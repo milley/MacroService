@@ -25,6 +25,10 @@ pub struct CliConfig {
     /// 数据存储目录
     #[arg(long, default_value = "./data")]
     pub data_dir: String,
+
+    /// 快照触发阈值（日志条目数超过此值时触发快照）
+    #[arg(long, default_value = "1000")]
+    pub snapshot_threshold: u64,
 }
 
 /// 集群节点信息
@@ -42,6 +46,7 @@ pub struct NodeConfig {
     pub raft_addr: SocketAddr,
     pub peers: Vec<Peer>,
     pub data_dir: String,
+    pub snapshot_threshold: u64,
 }
 
 impl From<CliConfig> for NodeConfig {
@@ -75,6 +80,7 @@ impl From<CliConfig> for NodeConfig {
                 .expect("Invalid raft address"),
             peers,
             data_dir: cli.data_dir,
+            snapshot_threshold: cli.snapshot_threshold,
         }
     }
 }
@@ -96,6 +102,7 @@ mod tests {
         assert_eq!(config.raft_port, 60051);
         assert_eq!(config.peers, "");
         assert_eq!(config.data_dir, "./data");
+        assert_eq!(config.snapshot_threshold, 1000);
     }
 
     #[test]
@@ -110,6 +117,17 @@ mod tests {
         assert_eq!(config.node_id, 2);
         assert_eq!(config.client_port, 50052);
         assert_eq!(config.raft_port, 60052);
+    }
+
+    #[test]
+    fn test_cli_config_snapshot_threshold() {
+        let config = parse_cli(&[
+            "test",
+            "--node-id", "1",
+            "--snapshot-threshold", "500",
+        ]);
+
+        assert_eq!(config.snapshot_threshold, 500);
     }
 
     #[test]
@@ -142,6 +160,7 @@ mod tests {
         assert_eq!(config.peers[0].id, 2);
         assert_eq!(config.peers[0].raft_addr, "127.0.0.1:60052");
         assert_eq!(config.peers[1].id, 3);
+        assert_eq!(config.snapshot_threshold, 1000);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 
 use crate::config::NodeConfig;
 use crate::proto::raft::raft_service_client::RaftServiceClient;
-use crate::raft::{LogStore, PendingRequests, RaftState};
+use crate::raft::{LogStore, PendingRequests, PersistentData, PersistentStorage, RaftState};
 
 /// 日志复制管理器
 pub struct Replication {
@@ -14,6 +14,10 @@ pub struct Replication {
     pending_requests: Option<Arc<PendingRequests>>,
     /// 成功心跳计数（用于租约续约）
     heartbeat_success_count: Arc<AtomicUsize>,
+    /// 持久化存储（用于保存快照）
+    storage: Option<Arc<PersistentStorage>>,
+    /// 快照阈值
+    snapshot_threshold: u64,
 }
 
 impl Replication {
@@ -34,11 +38,18 @@ impl Replication {
             peers,
             pending_requests: None,
             heartbeat_success_count: Arc::new(AtomicUsize::new(0)),
+            storage: None,
+            snapshot_threshold: config.snapshot_threshold,
         }
     }
 
     pub fn with_pending_requests(mut self, pending: Arc<PendingRequests>) -> Self {
         self.pending_requests = Some(pending);
+        self
+    }
+
+    pub fn with_storage(mut self, storage: Arc<PersistentStorage>) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -286,5 +297,232 @@ impl Replication {
         if let Some(pending) = &self.pending_requests {
             pending.notify_committed(commit_index).await;
         }
+    }
+
+    /// 检查是否需要创建快照
+    pub async fn should_snapshot(&self) -> bool {
+        let log = self.log.read().await;
+        log.should_snapshot(self.snapshot_threshold)
+    }
+
+    /// 创建快照
+    ///
+    /// 1. 获取当前状态机快照
+    /// 2. 更新 LogStore 的 snapshot_last_index/term
+    /// 3. 截断已快照的日志
+    /// 4. 持久化快照到磁盘
+    pub async fn create_snapshot(&self, kv_store: &crate::kv::KVStore) -> Result<(), String> {
+        let state = self.state.read().await;
+        let node_id = state.node_id;
+        drop(state);
+
+        // 1. 获取当前 commit_index 作为快照点
+        let commit_index = {
+            let state = self.state.read().await;
+            state.volatile.read().await.commit_index
+        };
+
+        // 如果 commit_index 为 0，无需快照
+        if commit_index == 0 {
+            return Ok(());
+        }
+
+        // 2. 获取快照点的任期
+        let snapshot_term = {
+            let log = self.log.read().await;
+            log.get(commit_index).map(|e| e.term).unwrap_or(0)
+        };
+
+        // 如果快照点已经在快照范围内，跳过
+        {
+            let log = self.log.read().await;
+            if commit_index <= log.snapshot_last_index {
+                tracing::debug!(
+                    "Node {} snapshot already covers index {}",
+                    node_id,
+                    commit_index
+                );
+                return Ok(());
+            }
+        }
+
+        // 3. 创建状态机快照
+        let snapshot_data = kv_store.snapshot().await;
+
+        tracing::info!(
+            "Node {} creating snapshot at index {} (term {}), size {} bytes",
+            node_id,
+            commit_index,
+            snapshot_term,
+            snapshot_data.len()
+        );
+
+        // 4. 更新 LogStore
+        {
+            let mut log = self.log.write().await;
+            log.apply_snapshot(commit_index, snapshot_term);
+        }
+
+        // 5. 持久化快照
+        if let Some(storage) = &self.storage {
+            let state = self.state.read().await;
+            let persistent_state = state.persistent.read().await.clone();
+            let log = self.log.read().await.clone();
+            let data = PersistentData::from_state_and_log(&persistent_state, &log)
+                .with_snapshot(snapshot_data);
+            drop(state);
+
+            if let Err(e) = storage.save(&data).await {
+                tracing::error!("Failed to persist snapshot: {}", e);
+                return Err(format!("Failed to persist snapshot: {}", e));
+            }
+        }
+
+        tracing::info!(
+            "Node {} snapshot created successfully, log entries after truncate: {}",
+            node_id,
+            self.log.read().await.entries.len()
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv::KVStore;
+    use crate::raft::{LogEntry, RaftState};
+    use tempfile::tempdir;
+
+    fn create_test_config() -> NodeConfig {
+        NodeConfig {
+            node_id: 1,
+            client_addr: "127.0.0.1:50051".parse().unwrap(),
+            raft_addr: "127.0.0.1:60051".parse().unwrap(),
+            peers: vec![
+                crate::config::Peer {
+                    id: 2,
+                    raft_addr: "127.0.0.1:60052".to_string(),
+                },
+                crate::config::Peer {
+                    id: 3,
+                    raft_addr: "127.0.0.1:60053".to_string(),
+                },
+            ],
+            data_dir: "./data".to_string(),
+            snapshot_threshold: 10,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_snapshot_below_threshold() {
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let config = create_test_config();
+
+        let replication = Replication::new(state, log, &config);
+
+        // 添加 5 条日志（低于阈值 10）
+        {
+            let mut log_guard = replication.log.write().await;
+            for i in 1..=5 {
+                log_guard.append_one(LogEntry::new(1, i, vec![1]));
+            }
+        }
+
+        assert!(!replication.should_snapshot().await);
+    }
+
+    #[tokio::test]
+    async fn test_should_snapshot_above_threshold() {
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let config = create_test_config();
+
+        let replication = Replication::new(state, log, &config);
+
+        // 添加 15 条日志（超过阈值 10）
+        {
+            let mut log_guard = replication.log.write().await;
+            for i in 1..=15 {
+                log_guard.append_one(LogEntry::new(1, i, vec![1]));
+            }
+        }
+
+        assert!(replication.should_snapshot().await);
+    }
+
+    #[tokio::test]
+    async fn test_create_snapshot() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+
+        let mut config = create_test_config();
+        config.data_dir = dir.path().to_str().unwrap().to_string();
+
+        let storage = Arc::new(PersistentStorage::new(&config.data_dir, 1));
+        let replication = Replication::new(state.clone(), log.clone(), &config)
+            .with_storage(storage.clone());
+
+        let kv_store = KVStore::new();
+
+        // 添加日志并设置 commit_index
+        {
+            let mut log_guard = log.write().await;
+            for i in 1..=5 {
+                log_guard.append_one(LogEntry::new(1, i, vec![1]));
+            }
+        }
+
+        {
+            let state_guard = state.write().await;
+            let mut volatile = state_guard.volatile.write().await;
+            volatile.commit_index = 5;
+        }
+
+        // 创建快照
+        let result = replication.create_snapshot(&kv_store).await;
+        assert!(result.is_ok());
+
+        // 验证日志被截断
+        let log_guard = log.read().await;
+        assert_eq!(log_guard.snapshot_last_index, 5);
+        assert_eq!(log_guard.snapshot_last_term, 1);
+        assert!(log_guard.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_snapshot_skip_if_already_covered() {
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let config = create_test_config();
+
+        let replication = Replication::new(state.clone(), log.clone(), &config);
+
+        let kv_store = KVStore::new();
+
+        // 设置已有的快照范围
+        {
+            let mut log_guard = log.write().await;
+            log_guard.snapshot_last_index = 10;
+            log_guard.snapshot_last_term = 1;
+        }
+
+        // 设置 commit_index 低于快照范围
+        {
+            let state_guard = state.write().await;
+            let mut volatile = state_guard.volatile.write().await;
+            volatile.commit_index = 5;
+        }
+
+        // 尝试创建快照（应该跳过）
+        let result = replication.create_snapshot(&kv_store).await;
+        assert!(result.is_ok());
+
+        // 验证快照范围未改变
+        let log_guard = log.read().await;
+        assert_eq!(log_guard.snapshot_last_index, 10);
     }
 }

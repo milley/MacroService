@@ -171,7 +171,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log_store.clone(),
             &config,
         )
-        .with_pending_requests(pending_requests.clone()),
+        .with_pending_requests(pending_requests.clone())
+        .with_storage(storage.clone()),
     );
 
     // 启动 Raft 主循环
@@ -219,6 +220,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 应用已提交的日志到状态机（所有节点）
             replication_for_loop.apply_committed_entries(&kv_for_loop).await;
+
+            // 检查是否需要创建快照
+            if replication_for_loop.should_snapshot().await {
+                if let Err(e) = replication_for_loop.create_snapshot(&kv_for_loop).await {
+                    tracing::error!("Failed to create snapshot: {}", e);
+                }
+            }
         }
     });
 
