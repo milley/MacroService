@@ -237,6 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         raft_state.clone(),
         log_store.clone(),
         pending_requests.clone(),
+        storage.clone(),
     );
 
     println!("\nServers starting...");

@@ -7,7 +7,7 @@ use crate::proto::kv::kv_service_server::KvService;
 use crate::proto::kv::{
     DeleteRequest, DeleteResponse, GetRequest, GetResponse, PutRequest, PutResponse,
 };
-use crate::raft::{LogStore, PendingRequests, RaftState};
+use crate::raft::{LogStore, PendingRequests, PersistentData, PersistentStorage, RaftState};
 
 /// KV gRPC 服务实现
 pub struct KVServiceImpl {
@@ -15,6 +15,7 @@ pub struct KVServiceImpl {
     raft_state: Option<Arc<RwLock<RaftState>>>,
     log_store: Option<Arc<RwLock<LogStore>>>,
     pending_requests: Option<Arc<PendingRequests>>,
+    storage: Option<Arc<PersistentStorage>>,
 }
 
 impl KVServiceImpl {
@@ -23,12 +24,14 @@ impl KVServiceImpl {
         raft_state: Arc<RwLock<RaftState>>,
         log_store: Arc<RwLock<LogStore>>,
         pending_requests: Arc<PendingRequests>,
+        storage: Arc<PersistentStorage>,
     ) -> Self {
         Self {
             store,
             raft_state: Some(raft_state),
             log_store: Some(log_store),
             pending_requests: Some(pending_requests),
+            storage: Some(storage),
         }
     }
 
@@ -106,6 +109,18 @@ impl KvService for KVServiceImpl {
             let index = log_guard.last_index() + 1;
             let entry = crate::raft::LogEntry::new(term, index, serialized);
             log_guard.append_one(entry);
+
+            // Leader 持久化日志
+            if let Some(storage) = &self.storage {
+                let state_guard = state.read().await;
+                let persistent_state = state_guard.persistent.read().await.clone();
+                let data = PersistentData::from_state_and_log(&persistent_state, &log_guard);
+                drop(state_guard);
+                if let Err(e) = storage.save(&data).await {
+                    tracing::error!("Failed to persist log: {}", e);
+                }
+            }
+
             drop(log_guard);
             drop(state_guard);
 
@@ -174,6 +189,18 @@ impl KvService for KVServiceImpl {
             let index = log_guard.last_index() + 1;
             let entry = crate::raft::LogEntry::new(term, index, serialized);
             log_guard.append_one(entry);
+
+            // Leader 持久化日志
+            if let Some(storage) = &self.storage {
+                let state_guard = state.read().await;
+                let persistent_state = state_guard.persistent.read().await.clone();
+                let data = PersistentData::from_state_and_log(&persistent_state, &log_guard);
+                drop(state_guard);
+                if let Err(e) = storage.save(&data).await {
+                    tracing::error!("Failed to persist log: {}", e);
+                }
+            }
+
             drop(log_guard);
             drop(state_guard);
 

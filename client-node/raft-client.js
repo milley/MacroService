@@ -135,3 +135,4 @@ class RaftKVClient {
 }
 
 module.exports = RaftKVClient;
+module.exports.RaftKVClient = RaftKVClient;
