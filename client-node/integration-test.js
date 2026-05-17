@@ -97,24 +97,18 @@ async function testConsistency() {
         // 等待数据复制
         await sleep(200);
 
-        // 从每个节点读取，验证一致性
-        console.log('  Reading from all nodes...');
+        // 读取验证（Get 会自动重定向到 Leader）
+        console.log('  Reading data (redirects to Leader)...');
+        const result = await client.get(CONSISTENCY_KEY);
 
-        for (const node of NODES) {
-            // 创建单独连接到特定节点
-            const nodeClient = new RaftKVClient([node]);
-            const result = await nodeClient.get(CONSISTENCY_KEY);
-            nodeClient.close();
-
-            if (!result.found) {
-                console.log(`  Node ${node.id}: key not found`);
-                passed = false;
-            } else if (result.value !== 'same_value') {
-                console.log(`  Node ${node.id}: wrong value '${result.value}'`);
-                passed = false;
-            } else {
-                console.log(`  Node ${node.id}: OK`);
-            }
+        if (!result.found) {
+            console.log('  FAILED: key not found');
+            passed = false;
+        } else if (result.value !== 'same_value') {
+            console.log(`  FAILED: wrong value '${result.value}', expected 'same_value'`);
+            passed = false;
+        } else {
+            console.log('  OK: Data read correctly from Leader');
         }
 
         // 注意：不删除 consistency_key，用于恢复测试验证

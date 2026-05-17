@@ -31,21 +31,42 @@ class RaftKVClient {
         return { id: first.id, client: this.clients[first.id] };
     }
 
-    // Get 操作
+    // Get 操作（自动重定向到 Leader）
     async get(key) {
-        return new Promise((resolve, reject) => {
+        for (let attempt = 0; attempt < 3; attempt++) {
             const { id, client } = this.getAnyClient();
-            const request = new kvMessages.GetRequest();
-            request.setKey(key);
 
-            client.get(request, (err, response) => {
-                if (err) reject(err);
-                else resolve({
-                    found: response.getFound(),
-                    value: response.getFound() ? Buffer.from(response.getValue()).toString('utf8') : null,
+            const result = await new Promise((resolve) => {
+                const request = new kvMessages.GetRequest();
+                request.setKey(key);
+
+                client.get(request, (err, response) => {
+                    if (err) {
+                        resolve({ found: false, error: err.message, leaderHint: 0, value: null });
+                    } else {
+                        resolve({
+                            found: response.getFound(),
+                            value: response.getFound() ? Buffer.from(response.getValue()).toString('utf8') : null,
+                            error: response.getError(),
+                            leaderHint: response.getLeaderHint(),
+                        });
+                    }
                 });
             });
-        });
+
+            if (result.found || !result.error) {
+                return { found: result.found, value: result.value };
+            }
+
+            if (result.error === 'not leader' && result.leaderHint > 0) {
+                this.leaderHint = result.leaderHint;
+                continue;
+            }
+
+            return { found: false, value: null };
+        }
+
+        return { found: false, value: null };
     }
 
     // Put 操作（自动重定向）

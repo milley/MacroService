@@ -57,6 +57,38 @@ impl KVServiceImpl {
             true // 单节点模式，不需要等待
         }
     }
+
+    /// 等待状态机应用到指定索引（ReadIndex 实现）
+    async fn wait_for_apply(&self, target_index: u64) -> bool {
+        if let Some(state) = &self.raft_state {
+            // 如果目标索引为 0，无需等待
+            if target_index == 0 {
+                return true;
+            }
+
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+
+            loop {
+                let last_applied = state.read().await.volatile.read().await.last_applied;
+                if last_applied >= target_index {
+                    return true;
+                }
+
+                if start.elapsed() > timeout {
+                    tracing::warn!(
+                        "Timeout waiting for apply: target={}, applied={}",
+                        target_index,
+                        last_applied
+                    );
+                    return false;
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            }
+        }
+        true
+    }
 }
 
 #[tonic::async_trait]
@@ -65,6 +97,37 @@ impl KvService for KVServiceImpl {
         let req = request.into_inner();
         let key = req.key;
 
+        // 如果有 Raft，实现 ReadIndex 读取
+        if let Some(state) = &self.raft_state {
+            let state_guard = state.read().await;
+
+            // 1. 检查是否是 Leader
+            if state_guard.role != crate::raft::NodeRole::Leader {
+                let leader_id = state_guard.leader_id.read().await;
+                return Ok(Response::new(GetResponse {
+                    found: false,
+                    value: vec![],
+                    error: "not leader".to_string(),
+                    leader_hint: leader_id.unwrap_or(0),
+                }));
+            }
+
+            // 2. 获取 read_index（当前 commit_index）
+            let read_index = state_guard.volatile.read().await.commit_index;
+            drop(state_guard);
+
+            // 3. 等待状态机应用到 read_index
+            if !self.wait_for_apply(read_index).await {
+                return Ok(Response::new(GetResponse {
+                    found: false,
+                    value: vec![],
+                    error: "timeout waiting for apply".to_string(),
+                    leader_hint: 0,
+                }));
+            }
+        }
+
+        // 4. 安全读取
         match self.store.get(&key).await {
             Some(value) => Ok(Response::new(GetResponse {
                 found: true,
