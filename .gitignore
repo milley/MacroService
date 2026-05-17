@@ -1,0 +1,25 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Node.js
+node_modules/
+package-lock.json
+
+# Generated proto code (optional - commit if needed)
+# client-node/proto/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

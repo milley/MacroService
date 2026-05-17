@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package calculator;
+
+// 计算器服务 - 演示不同类型的 gRPC 调用
+service Calculator {
+    // 简单一元调用：加法
+    rpc Add(AddRequest) returns (AddResponse);
+
+    // 服务端流式：生成质数序列
+    rpc StreamPrimes(PrimesRequest) returns (stream PrimeResponse);
+
+    // 客户端流式：计算多个数字的和
+    rpc SumStream(stream Number) returns (SumResponse);
+}
+
+message AddRequest {
+    int32 a = 1;
+    int32 b = 2;
+}
+
+message AddResponse {
+    int32 result = 1;
+}
+
+message PrimesRequest {
+    int32 limit = 1;  // 生成小于此值的质数
+}
+
+message PrimeResponse {
+    int32 prime = 1;
+}
+
+message Number {
+    int32 value = 1;
+}
+
+message SumResponse {
+    int32 sum = 1;
+    int32 count = 2;  // 接收了多少个数字
+}
