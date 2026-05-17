@@ -229,6 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         election.clone(),
         election_timer.clone(),
         storage.clone(),
+        kv_store.clone(),
     );
 
     // 创建 KV gRPC 服务

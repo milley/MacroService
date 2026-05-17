@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// 节点角色
@@ -38,6 +39,43 @@ pub struct VolatileState {
     pub last_applied: u64,
 }
 
+/// Leader 租约管理器
+#[derive(Debug, Clone)]
+pub struct LeaseManager {
+    /// 租约时长
+    lease_duration: Duration,
+    /// 租约过期时间
+    expires_at: Option<Instant>,
+}
+
+impl LeaseManager {
+    pub fn new(lease_duration_ms: u64) -> Self {
+        Self {
+            lease_duration: Duration::from_millis(lease_duration_ms),
+            expires_at: None,
+        }
+    }
+
+    /// 续约
+    pub fn renew(&mut self) {
+        self.expires_at = Some(Instant::now() + self.lease_duration);
+    }
+
+    /// 检查租约是否有效
+    pub fn is_valid(&self) -> bool {
+        match self.expires_at {
+            Some(expires) => Instant::now() < expires,
+            None => false,
+        }
+    }
+
+    /// 使租约失效
+    #[allow(dead_code)]
+    pub fn invalidate(&mut self) {
+        self.expires_at = None;
+    }
+}
+
 /// Leader 易失性状态（选举后重新初始化）
 #[derive(Debug, Clone)]
 pub struct LeaderState {
@@ -45,6 +83,8 @@ pub struct LeaderState {
     pub next_index: Vec<u64>,
     /// 每个节点的 matchIndex（已知复制的最高日志索引）
     pub match_index: Vec<u64>,
+    /// 租约管理器
+    pub lease: LeaseManager,
 }
 
 /// 完整的 Raft 状态
@@ -156,12 +196,13 @@ impl RaftState {
         let term = persistent.current_term;
         drop(persistent);
 
-        // 初始化 Leader 状态
+        // 初始化 Leader 状态（包含租约管理器）
         let log_len = 1; // TODO: 从 LogStore 获取
         let mut leader_state = self.leader_state.write().await;
         *leader_state = Some(LeaderState {
             next_index: vec![log_len; self.peers.len() + 1],
             match_index: vec![0; self.peers.len() + 1],
+            lease: LeaseManager::new(60), // 60ms 租约时长
         });
         drop(leader_state);
 

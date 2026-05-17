@@ -32,36 +32,70 @@ impl LogEntry {
 #[derive(Debug, Clone)]
 pub struct LogStore {
     pub entries: Vec<LogEntry>,
+    /// 快照包含的最后日志索引（0 表示无快照）
+    pub snapshot_last_index: u64,
+    /// 快照包含的最后日志任期
+    pub snapshot_last_term: u64,
 }
 
 impl LogStore {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            snapshot_last_index: 0,
+            snapshot_last_term: 0,
         }
     }
 
     /// 从已有日志条目创建
     pub fn from_entries(entries: Vec<LogEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            snapshot_last_index: 0,
+            snapshot_last_term: 0,
+        }
+    }
+
+    /// 从快照恢复创建
+    #[allow(dead_code)]
+    pub fn from_snapshot(snapshot_last_index: u64, snapshot_last_term: u64) -> Self {
+        Self {
+            entries: Vec::new(),
+            snapshot_last_index,
+            snapshot_last_term,
+        }
     }
 
     /// 获取最后一条日志的索引
     pub fn last_index(&self) -> u64 {
-        self.entries.len() as u64
+        if self.entries.is_empty() {
+            self.snapshot_last_index
+        } else {
+            self.snapshot_last_index + self.entries.len() as u64
+        }
     }
 
     /// 获取最后一条日志的任期
     pub fn last_term(&self) -> u64 {
-        self.entries.last().map(|e| e.term).unwrap_or(0)
+        if self.entries.is_empty() {
+            self.snapshot_last_term
+        } else {
+            self.entries.last().map(|e| e.term).unwrap_or(0)
+        }
     }
 
     /// 获取指定索引的日志
     pub fn get(&self, index: u64) -> Option<&LogEntry> {
-        if index == 0 || index > self.entries.len() as u64 {
+        // 如果索引在快照范围内，返回 None（已被压缩）
+        if index <= self.snapshot_last_index {
             return None;
         }
-        self.entries.get((index - 1) as usize)
+
+        let local_index = index - self.snapshot_last_index;
+        if local_index == 0 || local_index > self.entries.len() as u64 {
+            return None;
+        }
+        self.entries.get((local_index - 1) as usize)
     }
 
     /// 追加日志条目
@@ -76,21 +110,35 @@ impl LogStore {
         index
     }
 
-    /// 从指定索引截断日志
+    /// 从指定索引截断日志（保留该索引之前的日志）
     pub fn truncate(&mut self, from_index: u64) {
-        if from_index == 0 {
+        // 转换为本地索引
+        if from_index <= self.snapshot_last_index {
+            // 截断位置在快照内，清空所有日志
+            self.entries.clear();
+            return;
+        }
+
+        let local_from = from_index - self.snapshot_last_index;
+        if local_from == 0 {
             self.entries.clear();
         } else {
-            self.entries.truncate((from_index - 1) as usize);
+            self.entries.truncate((local_from - 1) as usize);
         }
     }
 
     /// 获取从指定索引开始的所有日志
     pub fn entries_from(&self, start_index: u64) -> Vec<LogEntry> {
-        if start_index == 0 || start_index > self.entries.len() as u64 {
+        // 如果起始索引在快照内，返回空（需要发送快照）
+        if start_index <= self.snapshot_last_index {
             return vec![];
         }
-        self.entries[(start_index - 1) as usize..].to_vec()
+
+        let local_start = start_index - self.snapshot_last_index;
+        if local_start == 0 || local_start > self.entries.len() as u64 {
+            return vec![];
+        }
+        self.entries[(local_start - 1) as usize..].to_vec()
     }
 
     /// 检查指定位置的日志是否匹配
@@ -98,10 +146,30 @@ impl LogStore {
         if prev_log_index == 0 {
             return true; // 空日志匹配
         }
+
+        // 如果索引在快照范围内，检查快照边界
+        if prev_log_index == self.snapshot_last_index {
+            return prev_log_term == self.snapshot_last_term;
+        }
+
         match self.get(prev_log_index) {
             Some(entry) => entry.term == prev_log_term,
             None => false,
         }
+    }
+
+    /// 应用快照：截断日志并更新快照边界
+    pub fn apply_snapshot(&mut self, last_included_index: u64, last_included_term: u64) {
+        self.snapshot_last_index = last_included_index;
+        self.snapshot_last_term = last_included_term;
+        // 丢弃快照覆盖的日志
+        self.entries.retain(|e| e.index > last_included_index);
+    }
+
+    /// 检查是否需要快照（日志数量超过阈值）
+    #[allow(dead_code)]
+    pub fn should_snapshot(&self, threshold: u64) -> bool {
+        self.entries.len() as u64 >= threshold
     }
 }
 

@@ -45,6 +45,24 @@ impl KVStore {
 
         Ok(())
     }
+
+    /// 创建状态机快照
+    #[allow(dead_code)]
+    pub async fn snapshot(&self) -> Vec<u8> {
+        let data = self.data.read().await;
+        serde_json::to_vec(&*data).unwrap_or_default()
+    }
+
+    /// 从快照恢复状态机
+    pub async fn restore(&self, snapshot: &[u8]) -> Result<(), String> {
+        let data: HashMap<String, Vec<u8>> = serde_json::from_slice(snapshot)
+            .map_err(|e| format!("Failed to deserialize snapshot: {}", e))?;
+
+        let mut guard = self.data.write().await;
+        *guard = data;
+
+        Ok(())
+    }
 }
 
 impl Default for KVStore {

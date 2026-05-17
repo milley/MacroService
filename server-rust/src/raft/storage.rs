@@ -6,7 +6,7 @@ use tokio::fs;
 use super::{LogEntry, LogStore, PersistentState, RaftState};
 
 /// 持久化数据格式版本
-const STORAGE_VERSION: u32 = 1;
+const STORAGE_VERSION: u32 = 2;
 
 /// 持久化错误类型
 #[derive(Debug, Error)]
@@ -28,6 +28,15 @@ pub struct PersistentData {
     pub voted_for: Option<u32>,
     /// 日志条目
     pub log: Vec<LogEntry>,
+    /// 快照包含的最后日志索引（0 表示无快照）
+    #[serde(default)]
+    pub snapshot_last_index: u64,
+    /// 快照包含的最后日志任期
+    #[serde(default)]
+    pub snapshot_last_term: u64,
+    /// 快照数据（状态机状态）
+    #[serde(default)]
+    pub snapshot_data: Option<Vec<u8>>,
 }
 
 impl PersistentData {
@@ -41,7 +50,16 @@ impl PersistentData {
             current_term: persistent_state.current_term,
             voted_for: persistent_state.voted_for,
             log: log_store.entries.clone(),
+            snapshot_last_index: log_store.snapshot_last_index,
+            snapshot_last_term: log_store.snapshot_last_term,
+            snapshot_data: None,
         }
+    }
+
+    /// 创建包含快照的持久化数据
+    pub fn with_snapshot(mut self, snapshot_data: Vec<u8>) -> Self {
+        self.snapshot_data = Some(snapshot_data);
+        self
     }
 
     /// 恢复 RaftState
@@ -51,7 +69,10 @@ impl PersistentData {
 
     /// 恢复 LogStore
     pub fn to_log_store(&self) -> LogStore {
-        LogStore::from_entries(self.log.clone())
+        let mut store = LogStore::from_entries(self.log.clone());
+        store.snapshot_last_index = self.snapshot_last_index;
+        store.snapshot_last_term = self.snapshot_last_term;
+        store
     }
 }
 
@@ -133,13 +154,16 @@ mod tests {
         let storage = PersistentStorage::new(dir.path().to_str().unwrap(), 1);
 
         let data = PersistentData {
-            version: 1,
+            version: 2,
             current_term: 5,
             voted_for: Some(2),
             log: vec![
                 LogEntry::new(1, 1, vec![1, 2, 3]),
                 LogEntry::new(3, 2, vec![4, 5, 6]),
             ],
+            snapshot_last_index: 0,
+            snapshot_last_term: 0,
+            snapshot_data: None,
         };
 
         // 保存
@@ -147,7 +171,7 @@ mod tests {
 
         // 加载
         let loaded = storage.load().await.unwrap().unwrap();
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, 2);
         assert_eq!(loaded.current_term, 5);
         assert_eq!(loaded.voted_for, Some(2));
         assert_eq!(loaded.log.len(), 2);
@@ -177,5 +201,34 @@ mod tests {
         assert_eq!(data.current_term, 10);
         assert_eq!(data.voted_for, Some(3));
         assert_eq!(data.log.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_with_snapshot() {
+        let dir = tempdir().unwrap();
+        let storage = PersistentStorage::new(dir.path().to_str().unwrap(), 1);
+
+        let mut log_store = LogStore::from_entries(vec![
+            LogEntry::new(3, 11, vec![1]),
+        ]);
+        log_store.snapshot_last_index = 10;
+        log_store.snapshot_last_term = 2;
+
+        let persistent_state = PersistentState {
+            current_term: 5,
+            voted_for: Some(2),
+        };
+
+        let data = PersistentData::from_state_and_log(&persistent_state, &log_store)
+            .with_snapshot(vec![1, 2, 3, 4]);
+
+        // 保存
+        storage.save(&data).await.unwrap();
+
+        // 加载
+        let loaded = storage.load().await.unwrap().unwrap();
+        assert_eq!(loaded.snapshot_last_index, 10);
+        assert_eq!(loaded.snapshot_last_term, 2);
+        assert_eq!(loaded.snapshot_data, Some(vec![1, 2, 3, 4]));
     }
 }

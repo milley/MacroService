@@ -97,7 +97,7 @@ impl KvService for KVServiceImpl {
         let req = request.into_inner();
         let key = req.key;
 
-        // 如果有 Raft，实现 ReadIndex 读取
+        // 如果有 Raft，实现 ReadIndex 读取（支持租约优化）
         if let Some(state) = &self.raft_state {
             let state_guard = state.read().await;
 
@@ -112,11 +112,36 @@ impl KvService for KVServiceImpl {
                 }));
             }
 
-            // 2. 获取 read_index（当前 commit_index）
+            // 2. 检查租约是否有效
+            let leader_state_guard = state_guard.leader_state.read().await;
+            if let Some(leader_state) = leader_state_guard.as_ref() {
+                if leader_state.lease.is_valid() {
+                    // 租约有效，直接读取（快速路径）
+                    drop(leader_state_guard);
+                    drop(state_guard);
+                    return match self.store.get(&key).await {
+                        Some(value) => Ok(Response::new(GetResponse {
+                            found: true,
+                            value,
+                            error: String::new(),
+                            leader_hint: 0,
+                        })),
+                        None => Ok(Response::new(GetResponse {
+                            found: false,
+                            value: vec![],
+                            error: String::new(),
+                            leader_hint: 0,
+                        })),
+                    };
+                }
+            }
+            drop(leader_state_guard);
+
+            // 3. 租约无效，回退到 ReadIndex
             let read_index = state_guard.volatile.read().await.commit_index;
             drop(state_guard);
 
-            // 3. 等待状态机应用到 read_index
+            // 4. 等待状态机应用到 read_index
             if !self.wait_for_apply(read_index).await {
                 return Ok(Response::new(GetResponse {
                     found: false,
@@ -127,7 +152,7 @@ impl KvService for KVServiceImpl {
             }
         }
 
-        // 4. 安全读取
+        // 5. 安全读取
         match self.store.get(&key).await {
             Some(value) => Ok(Response::new(GetResponse {
                 found: true,

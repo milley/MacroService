@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 
 use crate::config::NodeConfig;
@@ -11,6 +12,8 @@ pub struct Replication {
     log: Arc<RwLock<LogStore>>,
     peers: Vec<(u32, String)>,
     pending_requests: Option<Arc<PendingRequests>>,
+    /// 成功心跳计数（用于租约续约）
+    heartbeat_success_count: Arc<AtomicUsize>,
 }
 
 impl Replication {
@@ -30,6 +33,7 @@ impl Replication {
             log,
             peers,
             pending_requests: None,
+            heartbeat_success_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -69,6 +73,11 @@ impl Replication {
         let node_id = state.node_id;
         drop(state);
 
+        // 重置心跳成功计数
+        self.heartbeat_success_count.store(0, Ordering::SeqCst);
+        // Leader 自己算一个成功
+        self.heartbeat_success_count.fetch_add(1, Ordering::SeqCst);
+
         for (i, (peer_id, peer_addr)) in self.peers.iter().enumerate() {
             let peer_idx = i + 1; // 索引：0 是 Leader 自己，1, 2, ... 是 peers
             let next_index = next_indices[peer_idx];
@@ -106,6 +115,8 @@ impl Replication {
             let peer_id = *peer_id;
             let peer_addr = peer_addr.clone();
             let state_clone = self.state.clone();
+            let success_count_clone = self.heartbeat_success_count.clone();
+            let majority = (self.peers.len() + 1) / 2 + 1;
 
             tokio::spawn(async move {
                 match RaftServiceClient::connect(format!("http://{}", peer_addr)).await {
@@ -131,6 +142,15 @@ impl Replication {
                                     if response.success {
                                         leader_state.match_index[peer_idx] = response.match_index;
                                         leader_state.next_index[peer_idx] = response.match_index + 1;
+
+                                        // 记录心跳成功，检查是否达到多数派
+                                        let success_count = success_count_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                                        if success_count >= majority {
+                                            // 多数派确认，续约租约
+                                            leader_state.lease.renew();
+                                            tracing::debug!("Leader {} lease renewed ({} acks)", node_id, success_count);
+                                        }
+
                                         tracing::debug!(
                                             "Leader {} updated match_index for peer {} (idx {}) to {}",
                                             node_id,

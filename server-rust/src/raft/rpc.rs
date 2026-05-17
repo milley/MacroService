@@ -2,9 +2,10 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tokio::sync::RwLock;
 
+use crate::kv::KVStore;
 use crate::proto::raft::{
     raft_service_server::RaftService, AppendEntriesRequest, AppendEntriesResponse,
-    VoteRequest, VoteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
 };
 use crate::raft::{Election, ElectionTimer, LogStore, PersistentData, PersistentStorage, RaftState};
 
@@ -15,6 +16,7 @@ pub struct RaftServiceImpl {
     election: Arc<Election>,
     election_timer: Arc<RwLock<ElectionTimer>>,
     storage: Arc<PersistentStorage>,
+    kv_store: Arc<KVStore>,
 }
 
 impl RaftServiceImpl {
@@ -24,6 +26,7 @@ impl RaftServiceImpl {
         election: Arc<Election>,
         election_timer: Arc<RwLock<ElectionTimer>>,
         storage: Arc<PersistentStorage>,
+        kv_store: Arc<KVStore>,
     ) -> Self {
         Self {
             state,
@@ -31,6 +34,7 @@ impl RaftServiceImpl {
             election,
             election_timer,
             storage,
+            kv_store,
         }
     }
 }
@@ -155,6 +159,95 @@ impl RaftService for RaftServiceImpl {
             term: req.term,
             success: true,
             match_index,
+        }))
+    }
+
+    async fn install_snapshot(
+        &self,
+        request: Request<InstallSnapshotRequest>,
+    ) -> Result<Response<InstallSnapshotResponse>, Status> {
+        let req = request.into_inner();
+
+        // 重置选举定时器
+        let mut timer = self.election_timer.write().await;
+        timer.reset();
+        drop(timer);
+
+        let mut state = self.state.write().await;
+        let persistent = state.persistent.read().await;
+        let current_term = persistent.current_term;
+        drop(persistent);
+
+        tracing::info!(
+            "Node {} received InstallSnapshot from {} (term {}, last_included: {})",
+            state.node_id,
+            req.leader_id,
+            req.term,
+            req.last_included_index
+        );
+
+        // 如果 term < currentTerm，拒绝
+        if req.term < current_term {
+            return Ok(Response::new(InstallSnapshotResponse {
+                term: current_term,
+            }));
+        }
+
+        // 如果 term > currentTerm，更新任期并转换为 Follower
+        if req.term > current_term {
+            state.become_follower(req.term, Some(req.leader_id)).await;
+        } else if state.role == crate::raft::NodeRole::Candidate {
+            state.become_follower(req.term, Some(req.leader_id)).await;
+        }
+
+        // 更新已知 Leader
+        let mut leader_id = state.leader_id.write().await;
+        *leader_id = Some(req.leader_id);
+        drop(leader_id);
+
+        // 应用快照
+        let mut log = self.log.write().await;
+
+        // 检查快照是否比当前状态更新
+        if req.last_included_index > log.snapshot_last_index {
+            // 恢复状态机
+            if let Err(e) = self.kv_store.restore(&req.data).await {
+                tracing::error!("Failed to restore snapshot: {}", e);
+                return Ok(Response::new(InstallSnapshotResponse {
+                    term: current_term,
+                }));
+            }
+
+            // 更新日志快照边界
+            log.apply_snapshot(req.last_included_index, req.last_included_term);
+
+            // 更新 last_applied 和 commit_index
+            let mut volatile = state.volatile.write().await;
+            volatile.last_applied = req.last_included_index;
+            volatile.commit_index = std::cmp::max(volatile.commit_index, req.last_included_index);
+            drop(volatile);
+
+            // 持久化
+            let persistent_state = state.persistent.read().await.clone();
+            let data = PersistentData::from_state_and_log(&persistent_state, &log)
+                .with_snapshot(req.data.clone());
+            if let Err(e) = self.storage.save(&data).await {
+                tracing::error!("Failed to persist snapshot: {}", e);
+            }
+
+            tracing::info!(
+                "Node {} applied snapshot: last_included_index={}, log_entries={}",
+                state.node_id,
+                req.last_included_index,
+                log.entries.len()
+            );
+        }
+
+        drop(log);
+        drop(state);
+
+        Ok(Response::new(InstallSnapshotResponse {
+            term: req.term,
         }))
     }
 }
