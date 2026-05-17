@@ -3,13 +3,14 @@ use tokio::sync::RwLock;
 
 use crate::config::NodeConfig;
 use crate::proto::raft::{raft_service_client::RaftServiceClient, VoteRequest, VoteResponse};
-use crate::raft::{LogStore, NodeRole, RaftState};
+use crate::raft::{LogStore, NodeRole, PersistentData, PersistentStorage, RaftState};
 
 /// 选举管理器
 pub struct Election {
     state: Arc<RwLock<RaftState>>,
     log: Arc<RwLock<LogStore>>,
     peers: Vec<(u32, String)>, // (node_id, raft_addr)
+    storage: Arc<PersistentStorage>,
 }
 
 impl Election {
@@ -17,6 +18,7 @@ impl Election {
         state: Arc<RwLock<RaftState>>,
         log: Arc<RwLock<LogStore>>,
         config: &NodeConfig,
+        storage: Arc<PersistentStorage>,
     ) -> Self {
         let peers: Vec<(u32, String)> = config
             .peers
@@ -28,6 +30,7 @@ impl Election {
             state,
             log,
             peers,
+            storage,
         }
     }
 
@@ -37,7 +40,16 @@ impl Election {
         state.become_candidate().await;
         let term = state.persistent.read().await.current_term;
         let node_id = state.node_id;
+
+        // 持久化投票给自己的状态
+        let persistent_state = state.persistent.read().await.clone();
+        let log_store = self.log.read().await.clone();
         drop(state);
+
+        let data = PersistentData::from_state_and_log(&persistent_state, &log_store);
+        if let Err(e) = self.storage.save(&data).await {
+            tracing::error!("Failed to persist candidate state: {}", e);
+        }
 
         let log = self.log.read().await;
         let last_log_index = log.last_index();
@@ -180,8 +192,19 @@ impl Election {
                 request.candidate_id,
                 request.term
             );
+
+            // 持久化投票结果
+            let persistent_state = state.persistent.read().await.clone();
+            let log_store = self.log.read().await.clone();
+            drop(state);
+
+            let data = PersistentData::from_state_and_log(&persistent_state, &log_store);
+            if let Err(e) = self.storage.save(&data).await {
+                tracing::error!("Failed to persist vote: {}", e);
+            }
         }
 
+        let state = self.state.read().await;
         let persistent = state.persistent.read().await;
         VoteResponse {
             term: persistent.current_term,

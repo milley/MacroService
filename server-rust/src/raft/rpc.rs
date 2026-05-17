@@ -6,7 +6,7 @@ use crate::proto::raft::{
     raft_service_server::RaftService, AppendEntriesRequest, AppendEntriesResponse,
     VoteRequest, VoteResponse,
 };
-use crate::raft::{Election, ElectionTimer, LogStore, RaftState};
+use crate::raft::{Election, ElectionTimer, LogStore, PersistentData, PersistentStorage, RaftState};
 
 /// Raft gRPC 服务实现
 pub struct RaftServiceImpl {
@@ -14,6 +14,7 @@ pub struct RaftServiceImpl {
     log: Arc<RwLock<LogStore>>,
     election: Arc<Election>,
     election_timer: Arc<RwLock<ElectionTimer>>,
+    storage: Arc<PersistentStorage>,
 }
 
 impl RaftServiceImpl {
@@ -22,12 +23,14 @@ impl RaftServiceImpl {
         log: Arc<RwLock<LogStore>>,
         election: Arc<Election>,
         election_timer: Arc<RwLock<ElectionTimer>>,
+        storage: Arc<PersistentStorage>,
     ) -> Self {
         Self {
             state,
             log,
             election,
             election_timer,
+            storage,
         }
     }
 }
@@ -133,6 +136,16 @@ impl RaftService for RaftServiceImpl {
         if req.leader_commit > 0 {
             let mut volatile = state.volatile.write().await;
             volatile.commit_index = std::cmp::min(req.leader_commit, match_index);
+        }
+
+        // 持久化日志
+        {
+            let persistent_state = state.persistent.read().await.clone();
+            let log_store = log.clone();
+            let data = PersistentData::from_state_and_log(&persistent_state, &log_store);
+            if let Err(e) = self.storage.save(&data).await {
+                tracing::error!("Failed to persist log: {}", e);
+            }
         }
 
         drop(log);

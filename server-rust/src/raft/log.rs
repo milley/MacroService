@@ -41,6 +41,11 @@ impl LogStore {
         }
     }
 
+    /// 从已有日志条目创建
+    pub fn from_entries(entries: Vec<LogEntry>) -> Self {
+        Self { entries }
+    }
+
     /// 获取最后一条日志的索引
     pub fn last_index(&self) -> u64 {
         self.entries.len() as u64

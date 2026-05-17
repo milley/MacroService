@@ -13,7 +13,7 @@ use kv::{KVServiceImpl, KVStore};
 use proto::calculator::calculator_server::CalculatorServer;
 use proto::kv::kv_service_server::KvServiceServer;
 use proto::raft::raft_service_server::RaftServiceServer;
-use raft::{Election, ElectionTimer, HeartbeatTimer, LogStore, PendingRequests, RaftState, Replication};
+use raft::{Election, ElectionTimer, HeartbeatTimer, LogStore, PendingRequests, PersistentStorage, RaftState, Replication};
 
 /// Calculator 服务实现（保留原有 demo）
 mod calculator_service {
@@ -112,11 +112,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Client API: {}", config.client_addr);
     println!("  Raft RPC:   {}", config.raft_addr);
     println!("  Peers:      {} nodes", config.peers.len());
+    println!("  Data Dir:   {}", config.data_dir);
 
-    // 初始化 Raft 状态
+    // 创建持久化存储
+    let storage = Arc::new(PersistentStorage::new(&config.data_dir, config.node_id));
+
+    // 初始化 Raft 状态（尝试从持久化数据恢复）
     let peers: Vec<u32> = config.peers.iter().map(|p| p.id).collect();
-    let raft_state = Arc::new(RwLock::new(RaftState::new(config.node_id, peers)));
-    let log_store = Arc::new(RwLock::new(LogStore::new()));
+    let (raft_state, log_store) = match storage.load().await {
+        Ok(Some(data)) => {
+            tracing::info!(
+                "Recovered from persistent storage: term={}, log_len={}",
+                data.current_term,
+                data.log.len()
+            );
+            (
+                Arc::new(RwLock::new(data.to_raft_state(config.node_id, peers.clone()))),
+                Arc::new(RwLock::new(data.to_log_store())),
+            )
+        }
+        Ok(None) => {
+            tracing::info!("Starting with clean state");
+            (
+                Arc::new(RwLock::new(RaftState::new(config.node_id, peers.clone()))),
+                Arc::new(RwLock::new(LogStore::new())),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load persistent data: {}, starting fresh", e);
+            (
+                Arc::new(RwLock::new(RaftState::new(config.node_id, peers.clone()))),
+                Arc::new(RwLock::new(LogStore::new())),
+            )
+        }
+    };
+
     let election_timer = Arc::new(RwLock::new(ElectionTimer::new()));
     let heartbeat_timer = Arc::new(RwLock::new(HeartbeatTimer::new(50)));
 
@@ -131,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         raft_state.clone(),
         log_store.clone(),
         &config,
+        storage.clone(),
     ));
 
     // 创建复制管理器
@@ -197,6 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_store.clone(),
         election.clone(),
         election_timer.clone(),
+        storage.clone(),
     );
 
     // 创建 KV gRPC 服务

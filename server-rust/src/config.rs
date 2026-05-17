@@ -21,6 +21,10 @@ pub struct CliConfig {
     /// 集群节点列表 (格式: id@host:port,id@host:port)
     #[arg(long, default_value = "")]
     pub peers: String,
+
+    /// 数据存储目录
+    #[arg(long, default_value = "./data")]
+    pub data_dir: String,
 }
 
 /// 集群节点信息
@@ -37,6 +41,7 @@ pub struct NodeConfig {
     pub client_addr: SocketAddr,
     pub raft_addr: SocketAddr,
     pub peers: Vec<Peer>,
+    pub data_dir: String,
 }
 
 impl From<CliConfig> for NodeConfig {
@@ -69,6 +74,7 @@ impl From<CliConfig> for NodeConfig {
                 .parse()
                 .expect("Invalid raft address"),
             peers,
+            data_dir: cli.data_dir,
         }
     }
 }
@@ -89,6 +95,7 @@ mod tests {
         assert_eq!(config.client_port, 50051);
         assert_eq!(config.raft_port, 60051);
         assert_eq!(config.peers, "");
+        assert_eq!(config.data_dir, "./data");
     }
 
     #[test]

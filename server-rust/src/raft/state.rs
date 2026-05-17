@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -20,7 +21,7 @@ impl std::fmt::Display for NodeRole {
 }
 
 /// 持久化状态（必须在使用前保存）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentState {
     /// 当前任期
     pub current_term: u64,
@@ -73,6 +74,30 @@ impl RaftState {
             persistent: Arc::new(RwLock::new(PersistentState {
                 current_term: 0,
                 voted_for: None,
+            })),
+            volatile: Arc::new(RwLock::new(VolatileState {
+                commit_index: 0,
+                last_applied: 0,
+            })),
+            leader_state: Arc::new(RwLock::new(None)),
+            leader_id: Arc::new(RwLock::new(None)),
+            peers,
+        }
+    }
+
+    /// 从持久化数据恢复状态
+    pub fn from_persistent(
+        node_id: u32,
+        peers: Vec<u32>,
+        current_term: u64,
+        voted_for: Option<u32>,
+    ) -> Self {
+        Self {
+            node_id,
+            role: NodeRole::Follower,
+            persistent: Arc::new(RwLock::new(PersistentState {
+                current_term,
+                voted_for,
             })),
             volatile: Arc::new(RwLock::new(VolatileState {
                 commit_index: 0,
