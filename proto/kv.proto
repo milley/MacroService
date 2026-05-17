@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package kv;
+
+// 客户端 KV 存储服务
+service KVService {
+    rpc Get(GetRequest) returns (GetResponse);
+    rpc Put(PutRequest) returns (PutResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+message GetRequest {
+    string key = 1;
+}
+
+message GetResponse {
+    bool found = 1;
+    bytes value = 2;
+    string error = 3;
+    uint32 leader_hint = 4;
+}
+
+message PutRequest {
+    string key = 1;
+    bytes value = 2;
+}
+
+message PutResponse {
+    bool success = 1;
+    string error = 2;
+    uint32 leader_hint = 3;
+}
+
+message DeleteRequest {
+    string key = 1;
+}
+
+message DeleteResponse {
+    bool success = 1;
+    string error = 2;
+    uint32 leader_hint = 3;
+}

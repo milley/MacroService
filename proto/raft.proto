@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package raft;
+
+// Raft 内部服务 - 节点间通信
+service RaftService {
+    // 领导者选举
+    rpc RequestVote(VoteRequest) returns (VoteResponse);
+
+    // 日志复制和心跳
+    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+// ============ 投票消息 ============
+
+message VoteRequest {
+    uint64 term = 1;
+    uint32 candidate_id = 2;
+    uint64 last_log_index = 3;
+    uint64 last_log_term = 4;
+}
+
+message VoteResponse {
+    uint64 term = 1;
+    bool vote_granted = 2;
+}
+
+// ============ 日志复制消息 ============
+
+message AppendEntriesRequest {
+    uint64 term = 1;
+    uint32 leader_id = 2;
+    uint64 prev_log_index = 3;
+    uint64 prev_log_term = 4;
+    repeated LogEntry entries = 5;
+    uint64 leader_commit = 6;
+}
+
+message LogEntry {
+    uint64 term = 1;
+    uint64 index = 2;
+    bytes command = 3;
+}
+
+message AppendEntriesResponse {
+    uint64 term = 1;
+    bool success = 2;
+    uint64 match_index = 3;
+}

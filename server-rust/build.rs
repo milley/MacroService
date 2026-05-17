@@ -1,5 +1,12 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
-        .compile_protos(&["../proto/calculator.proto"], &["../proto/"])?;
+        .compile_protos(
+            &[
+                "../proto/calculator.proto",
+                "../proto/kv.proto",
+                "../proto/raft.proto",
+            ],
+            &["../proto/"],
+        )?;
     Ok(())
 }
