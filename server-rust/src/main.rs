@@ -172,7 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config,
         )
         .with_pending_requests(pending_requests.clone())
-        .with_storage(storage.clone()),
+        .with_storage(storage.clone())
+        .with_kv_store(kv_store.clone()),
     );
 
     // 启动 Raft 主循环

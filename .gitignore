@@ -4,6 +4,8 @@ Cargo.lock
 **/*.rs.bk
 server-rust/data/*
 
+.claude/
+
 # Node.js
 node_modules/
 package-lock.json

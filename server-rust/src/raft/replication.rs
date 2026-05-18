@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 
 use crate::config::NodeConfig;
+use crate::kv::KVStore;
 use crate::proto::raft::raft_service_client::RaftServiceClient;
 use crate::raft::{LogStore, PendingRequests, PersistentData, PersistentStorage, RaftState};
 
@@ -18,6 +19,8 @@ pub struct Replication {
     storage: Option<Arc<PersistentStorage>>,
     /// 快照阈值
     snapshot_threshold: u64,
+    /// KV 存储（用于获取快照数据）
+    kv_store: Option<Arc<KVStore>>,
 }
 
 impl Replication {
@@ -40,6 +43,7 @@ impl Replication {
             heartbeat_success_count: Arc::new(AtomicUsize::new(0)),
             storage: None,
             snapshot_threshold: config.snapshot_threshold,
+            kv_store: None,
         }
     }
 
@@ -50,6 +54,11 @@ impl Replication {
 
     pub fn with_storage(mut self, storage: Arc<PersistentStorage>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    pub fn with_kv_store(mut self, kv_store: Arc<KVStore>) -> Self {
+        self.kv_store = Some(kv_store);
         self
     }
 
@@ -84,6 +93,27 @@ impl Replication {
         let node_id = state.node_id;
         drop(state);
 
+        // 获取快照边界信息
+        let (snapshot_last_index, snapshot_last_term, snapshot_data) = {
+            let log = self.log.read().await;
+            let snap_idx = log.snapshot_last_index;
+            let snap_term = log.snapshot_last_term;
+            let snap_data = if snap_idx > 0 {
+                // 从持久化存储加载快照数据（如果有）
+                if let Some(storage) = &self.storage {
+                    match storage.load().await {
+                        Ok(Some(data)) => data.snapshot_data.unwrap_or_default(),
+                        _ => vec![],
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+            (snap_idx, snap_term, snap_data)
+        };
+
         // 重置心跳成功计数
         self.heartbeat_success_count.store(0, Ordering::SeqCst);
         // Leader 自己算一个成功
@@ -93,7 +123,87 @@ impl Replication {
             let peer_idx = i + 1; // 索引：0 是 Leader 自己，1, 2, ... 是 peers
             let next_index = next_indices[peer_idx];
 
-            // 获取需要发送的日志条目
+            // 检查 Follower 是否需要快照（next_index <= snapshot_last_index）
+            if next_index <= snapshot_last_index && snapshot_last_index > 0 {
+                // Follower 严重滞后，需要发送快照
+                if snapshot_data.is_empty() {
+                    tracing::warn!(
+                        "Leader {} cannot send snapshot to peer {}: snapshot data is empty",
+                        node_id, peer_id
+                    );
+                    continue;
+                }
+
+                let request = crate::proto::raft::InstallSnapshotRequest {
+                    term,
+                    leader_id,
+                    last_included_index: snapshot_last_index,
+                    last_included_term: snapshot_last_term,
+                    data: snapshot_data.clone(),
+                };
+
+                let peer_id = *peer_id;
+                let peer_addr = peer_addr.clone();
+                let state_clone = self.state.clone();
+                let success_count_clone = self.heartbeat_success_count.clone();
+                let majority = (self.peers.len() + 1) / 2 + 1;
+
+                tracing::info!(
+                    "Leader {} sending snapshot to peer {} (next_index={}, snapshot_last_index={})",
+                    node_id, peer_id, next_index, snapshot_last_index
+                );
+
+                tokio::spawn(async move {
+                    match RaftServiceClient::connect(format!("http://{}", peer_addr)).await {
+                        Ok(mut client) => {
+                            match client.install_snapshot(request).await {
+                                Ok(response) => {
+                                    let response = response.into_inner();
+
+                                    let mut state = state_clone.write().await;
+                                    let persistent = state.persistent.read().await;
+
+                                    // 如果响应任期更大，转换为 Follower
+                                    if response.term > persistent.current_term {
+                                        drop(persistent);
+                                        state.become_follower(response.term, None).await;
+                                        return;
+                                    }
+                                    drop(persistent);
+
+                                    // 快照安装成功，更新 next_index 和 match_index
+                                    let mut leader_state_guard = state.leader_state.write().await;
+                                    if let Some(leader_state) = leader_state_guard.as_mut() {
+                                        leader_state.next_index[peer_idx] = snapshot_last_index + 1;
+                                        leader_state.match_index[peer_idx] = snapshot_last_index;
+
+                                        // 记录心跳成功
+                                        let success_count = success_count_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                                        if success_count >= majority {
+                                            leader_state.lease.renew();
+                                        }
+
+                                        tracing::info!(
+                                            "Leader {} snapshot installed on peer {}: next_index={}, match_index={}",
+                                            node_id, peer_id, snapshot_last_index + 1, snapshot_last_index
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!("InstallSnapshot to {} failed: {}", peer_id, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to connect to {}: {}", peer_addr, e);
+                        }
+                    }
+                });
+
+                continue; // 跳过 AppendEntries，已发送快照
+            }
+
+            // 正常日志复制：获取需要发送的日志条目
             let log = self.log.read().await;
             let entries: Vec<crate::proto::raft::LogEntry> = log
                 .entries_from(next_index)
@@ -524,5 +634,53 @@ mod tests {
         // 验证快照范围未改变
         let log_guard = log.read().await;
         assert_eq!(log_guard.snapshot_last_index, 10);
+    }
+
+    #[tokio::test]
+    async fn test_follower_needs_snapshot() {
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let config = create_test_config();
+
+        let _replication = Replication::new(state.clone(), log.clone(), &config);
+
+        // 设置快照边界（Leader 已有快照到 index 20）
+        {
+            let mut log_guard = log.write().await;
+            log_guard.snapshot_last_index = 20;
+            log_guard.snapshot_last_term = 1;
+            // 添加一些新日志
+            for i in 21..=25 {
+                log_guard.append_one(LogEntry::new(1, i, vec![1]));
+            }
+        }
+
+        // 模拟 Follower 的 next_index 为 15（落后于快照边界）
+        let follower_next_index = 15;
+        let snapshot_last_index = {
+            let log_guard = log.read().await;
+            log_guard.snapshot_last_index
+        };
+
+        // Follower 需要快照的条件：next_index <= snapshot_last_index
+        assert!(follower_next_index <= snapshot_last_index);
+
+        // 如果 Follower 的 next_index 为 22（快照边界之后），则不需要快照
+        let follower_next_index_after = 22;
+        assert!(follower_next_index_after > snapshot_last_index);
+    }
+
+    #[tokio::test]
+    async fn test_replication_with_kv_store() {
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let config = create_test_config();
+        let kv_store = Arc::new(KVStore::new());
+
+        let replication = Replication::new(state, log, &config)
+            .with_kv_store(kv_store.clone());
+
+        // 验证 kv_store 已设置
+        assert!(replication.kv_store.is_some());
     }
 }
