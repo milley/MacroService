@@ -7,6 +7,9 @@ service RaftService {
     // 领导者选举
     rpc RequestVote(VoteRequest) returns (VoteResponse);
 
+    // 预投票（PreVote 优化）
+    rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
+
     // 日志复制和心跳
     rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 
@@ -26,6 +29,20 @@ message VoteRequest {
 message VoteResponse {
     uint64 term = 1;
     bool vote_granted = 2;
+}
+
+// ============ 预投票消息（PreVote 优化） ============
+
+message PreVoteRequest {
+    uint64 term = 1;              // 候选人预期的任期（current_term + 1）
+    uint32 candidate_id = 2;      // 候选人 ID
+    uint64 last_log_index = 3;    // 候选人最后日志索引
+    uint64 last_log_term = 4;     // 候选人最后日志任期
+}
+
+message PreVoteResponse {
+    uint64 term = 1;              // 响应者的当前任期
+    bool vote_granted = 2;        // 是否同意预投票
 }
 
 // ============ 日志复制消息 ============

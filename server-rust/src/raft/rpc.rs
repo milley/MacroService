@@ -5,7 +5,8 @@ use tokio::sync::RwLock;
 use crate::kv::KVStore;
 use crate::proto::raft::{
     raft_service_server::RaftService, AppendEntriesRequest, AppendEntriesResponse,
-    InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse, VoteRequest,
+    VoteResponse,
 };
 use crate::raft::{Election, ElectionTimer, LogStore, PersistentData, PersistentStorage, RaftState};
 
@@ -53,6 +54,17 @@ impl RaftService for RaftServiceImpl {
         drop(timer);
 
         let response = self.election.handle_request_vote(req).await;
+        Ok(Response::new(response))
+    }
+
+    async fn pre_vote(
+        &self,
+        request: Request<PreVoteRequest>,
+    ) -> Result<Response<PreVoteResponse>, Status> {
+        let req = request.into_inner();
+
+        // PreVote 不重置选举定时器（不改变状态）
+        let response = self.election.handle_pre_vote(req).await;
         Ok(Response::new(response))
     }
 
