@@ -12,6 +12,6 @@ pub use log::{LogEntry, LogStore};
 pub use pending::PendingRequests;
 pub use replication::Replication;
 pub use rpc::RaftServiceImpl;
-pub use state::{NodeRole, PersistentState, RaftState};
+pub use state::{LeaderState, LeaseManager, NodeRole, PersistentState, RaftState};
 pub use storage::{PersistentData, PersistentStorage};
 pub use timer::{ElectionTimer, HeartbeatTimer};

@@ -5,8 +5,9 @@ use tokio::sync::RwLock;
 use crate::kv::KVStore;
 use crate::proto::raft::{
     raft_service_server::RaftService, AppendEntriesRequest, AppendEntriesResponse,
-    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse, VoteRequest,
-    VoteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse,
+    TimeoutNowRequest, TimeoutNowResponse, TransferLeaderRequest, TransferLeaderResponse,
+    VoteRequest, VoteResponse,
 };
 use crate::raft::{Election, ElectionTimer, LogStore, PersistentData, PersistentStorage, RaftState};
 
@@ -261,5 +262,35 @@ impl RaftService for RaftServiceImpl {
         Ok(Response::new(InstallSnapshotResponse {
             term: req.term,
         }))
+    }
+
+    async fn transfer_leader(
+        &self,
+        request: Request<TransferLeaderRequest>,
+    ) -> Result<Response<TransferLeaderResponse>, Status> {
+        let req = request.into_inner();
+
+        tracing::info!(
+            "Received TransferLeader request: target={}",
+            req.target_id
+        );
+
+        let response = self.election.handle_transfer_leader(req).await;
+        Ok(Response::new(response))
+    }
+
+    async fn timeout_now(
+        &self,
+        request: Request<TimeoutNowRequest>,
+    ) -> Result<Response<TimeoutNowResponse>, Status> {
+        let req = request.into_inner();
+
+        // 重置选举定时器
+        let mut timer = self.election_timer.write().await;
+        timer.reset();
+        drop(timer);
+
+        let response = self.election.handle_timeout_now(req).await;
+        Ok(Response::new(response))
     }
 }

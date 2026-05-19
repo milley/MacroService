@@ -3,8 +3,8 @@ use tokio::sync::RwLock;
 
 use crate::config::NodeConfig;
 use crate::proto::raft::{
-    raft_service_client::RaftServiceClient, PreVoteRequest, PreVoteResponse, VoteRequest,
-    VoteResponse,
+    raft_service_client::RaftServiceClient, PreVoteRequest, PreVoteResponse, TimeoutNowRequest,
+    TimeoutNowResponse, TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use crate::raft::{LogStore, NodeRole, PersistentData, PersistentStorage, RaftState};
 
@@ -390,6 +390,256 @@ impl Election {
             vote_granted: true,
         }
     }
+
+    /// 发起 Leader 转移
+    ///
+    /// 1. 检查目标节点是否存在
+    /// 2. 确保目标节点日志是最新的
+    /// 3. 发送 TimeoutNow 给目标节点
+    /// 4. Leader 转为 Follower
+    pub async fn transfer_leader(&self, target_id: u32) -> Result<(), String> {
+        let state = self.state.read().await;
+
+        // 只有 Leader 才能转移领导权
+        if state.role != NodeRole::Leader {
+            return Err("not leader".to_string());
+        }
+
+        let node_id = state.node_id;
+
+        // 检查目标节点是否是自己
+        if target_id == node_id {
+            return Err("cannot transfer leadership to self".to_string());
+        }
+
+        // 检查目标节点是否在集群中
+        let target_addr = self
+            .peers
+            .iter()
+            .find(|(id, _)| *id == target_id)
+            .map(|(_, addr)| addr.clone());
+
+        let target_addr = match target_addr {
+            Some(addr) => addr,
+            None => return Err(format!("target node {} not found in cluster", target_id)),
+        };
+
+        // 检查目标节点的 match_index 是否与 Leader 一致
+        let (match_index, last_index) = {
+            let leader_state = state.leader_state.read().await;
+            let leader_state = match leader_state.as_ref() {
+                Some(ls) => ls,
+                None => return Err("leader state not available".to_string()),
+            };
+
+            // 找到目标节点在 match_index 数组中的索引
+            let peer_idx = self
+                .peers
+                .iter()
+                .position(|(id, _)| *id == target_id)
+                .map(|i| i + 1); // +1 因为 index 0 是 Leader 自己
+
+            let peer_idx = match peer_idx {
+                Some(idx) => idx,
+                None => return Err(format!("target node {} not found in peers", target_id)),
+            };
+
+            let log = self.log.read().await;
+            (leader_state.match_index[peer_idx], log.last_index())
+        };
+
+        drop(state);
+
+        // 如果目标节点日志不是最新的，需要先同步
+        if match_index < last_index {
+            tracing::info!(
+                "Leader {} waiting for target {} to catch up (match={}, last={})",
+                node_id,
+                target_id,
+                match_index,
+                last_index
+            );
+            // 在实际实现中，这里应该等待日志同步
+            // 简化版本：直接返回错误
+            return Err(format!(
+                "target node {} log not up-to-date (match={}, last={})",
+                target_id, match_index, last_index
+            ));
+        }
+
+        tracing::info!(
+            "Leader {} transferring leadership to node {}",
+            node_id,
+            target_id
+        );
+
+        // 发送 TimeoutNow 给目标节点
+        let current_term = {
+            let state = self.state.read().await;
+            state.persistent.read().await.current_term
+        };
+
+        let request = TimeoutNowRequest { term: current_term };
+
+        match RaftServiceClient::connect(format!("http://{}", target_addr)).await {
+            Ok(mut client) => {
+                match client.timeout_now(request).await {
+                    Ok(response) => {
+                        let response = response.into_inner();
+                        if response.term > current_term {
+                            tracing::warn!(
+                                "Target node {} has higher term {}, stepping down",
+                                target_id,
+                                response.term
+                            );
+                            let mut state = self.state.write().await;
+                            state.become_follower(response.term, Some(target_id)).await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("TimeoutNow to {} failed: {}", target_id, e);
+                        return Err(format!("TimeoutNow failed: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to connect to {}: {}", target_addr, e);
+                return Err(format!("connection failed: {}", e));
+            }
+        }
+
+        // Leader 转为 Follower
+        let mut state = self.state.write().await;
+        state
+            .become_follower(current_term, Some(target_id))
+            .await;
+
+        tracing::info!(
+            "Leader {} stepped down after transferring to {}",
+            node_id,
+            target_id
+        );
+
+        Ok(())
+    }
+
+    /// 处理 TransferLeader 请求（客户端发起）
+    pub async fn handle_transfer_leader(
+        &self,
+        request: TransferLeaderRequest,
+    ) -> TransferLeaderResponse {
+        let state = self.state.read().await;
+        let current_term = state.persistent.read().await.current_term;
+        drop(state);
+
+        // 检查任期
+        if request.term < current_term {
+            return TransferLeaderResponse {
+                term: current_term,
+                success: false,
+            };
+        }
+
+        // 执行转移
+        match self.transfer_leader(request.target_id).await {
+            Ok(()) => TransferLeaderResponse {
+                term: current_term,
+                success: true,
+            },
+            Err(e) => {
+                tracing::error!("Transfer leader failed: {}", e);
+                TransferLeaderResponse {
+                    term: current_term,
+                    success: false,
+                }
+            }
+        }
+    }
+
+    /// 处理 TimeoutNow 请求
+    ///
+    /// 收到此请求的节点应立即开始选举（不等待选举超时）
+    pub async fn handle_timeout_now(&self, request: TimeoutNowRequest) -> TimeoutNowResponse {
+        let mut state = self.state.write().await;
+        let current_term = state.persistent.read().await.current_term;
+        let node_id = state.node_id;
+
+        // 如果请求的任期小于当前任期，忽略
+        if request.term < current_term {
+            return TimeoutNowResponse { term: current_term };
+        }
+
+        tracing::info!(
+            "Node {} received TimeoutNow, starting immediate election",
+            node_id
+        );
+
+        // 立即开始选举（跳过 PreVote）
+        state.become_candidate().await;
+        drop(state);
+
+        // 持久化
+        let state = self.state.read().await;
+        let persistent_state = state.persistent.read().await.clone();
+        let log_store = self.log.read().await.clone();
+        drop(state);
+
+        let data = PersistentData::from_state_and_log(&persistent_state, &log_store);
+        if let Err(e) = self.storage.save(&data).await {
+            tracing::error!("Failed to persist candidate state: {}", e);
+        }
+
+        // 异步发起选举
+        let new_term = persistent_state.current_term;
+        let log = self.log.read().await;
+        let last_log_index = log.last_index();
+        let last_log_term = log.last_term();
+        drop(log);
+
+        let mut votes_received = 1; // 投给自己
+        let majority = (self.peers.len() + 1) / 2 + 1;
+
+        for (peer_id, peer_addr) in &self.peers {
+            match RaftServiceClient::connect(format!("http://{}", peer_addr)).await {
+                Ok(mut client) => {
+                    let request = VoteRequest {
+                        term: new_term,
+                        candidate_id: node_id,
+                        last_log_index,
+                        last_log_term,
+                    };
+
+                    match client.request_vote(request).await {
+                        Ok(response) => {
+                            let response = response.into_inner();
+                            if response.vote_granted {
+                                votes_received += 1;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("RequestVote to {} failed: {}", peer_id, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to connect to {}: {}", peer_addr, e);
+                }
+            }
+        }
+
+        // 检查是否获得多数票
+        if votes_received >= majority as i32 {
+            tracing::info!(
+                "Node {} won immediate election with {} votes",
+                node_id,
+                votes_received
+            );
+            let mut state = self.state.write().await;
+            state.become_leader().await;
+        }
+
+        TimeoutNowResponse { term: new_term }
+    }
 }
 
 #[cfg(test)]
@@ -561,5 +811,100 @@ mod tests {
         assert_eq!(persistent.current_term, 0); // term 未改变
         assert!(persistent.voted_for.is_none()); // 未投票
         assert_eq!(state_guard.role, NodeRole::Follower); // 角色未改变
+    }
+
+    #[tokio::test]
+    async fn test_transfer_leader_not_leader() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let mut config = create_test_config();
+        config.data_dir = dir.path().to_str().unwrap().to_string();
+        let storage = Arc::new(PersistentStorage::new(&config.data_dir, 1));
+
+        let election = Election::new(state, log, &config, storage);
+
+        // Follower 尝试转移领导权（应该失败）
+        let result = election.transfer_leader(2).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "not leader");
+    }
+
+    #[tokio::test]
+    async fn test_transfer_leader_to_self() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let mut config = create_test_config();
+        config.data_dir = dir.path().to_str().unwrap().to_string();
+        let storage = Arc::new(PersistentStorage::new(&config.data_dir, 1));
+
+        // 设置为 Leader
+        {
+            let mut state_guard = state.write().await;
+            state_guard.role = NodeRole::Leader;
+            let mut leader_state = state_guard.leader_state.write().await;
+            *leader_state = Some(crate::raft::LeaderState {
+                next_index: vec![1, 1, 1],
+                match_index: vec![0, 0, 0],
+                lease: crate::raft::LeaseManager::new(60),
+            });
+        }
+
+        let election = Election::new(state, log, &config, storage);
+
+        // 尝试转移给自己（应该失败）
+        let result = election.transfer_leader(1).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("self"));
+    }
+
+    #[tokio::test]
+    async fn test_transfer_leader_target_not_found() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let mut config = create_test_config();
+        config.data_dir = dir.path().to_str().unwrap().to_string();
+        let storage = Arc::new(PersistentStorage::new(&config.data_dir, 1));
+
+        // 设置为 Leader
+        {
+            let mut state_guard = state.write().await;
+            state_guard.role = NodeRole::Leader;
+            let mut leader_state = state_guard.leader_state.write().await;
+            *leader_state = Some(crate::raft::LeaderState {
+                next_index: vec![1, 1, 1],
+                match_index: vec![0, 0, 0],
+                lease: crate::raft::LeaseManager::new(60),
+            });
+        }
+
+        let election = Election::new(state, log, &config, storage);
+
+        // 尝试转移给不存在的节点
+        let result = election.transfer_leader(99).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_timeout_now_becomes_candidate() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(RwLock::new(RaftState::new(1, vec![2, 3])));
+        let log = Arc::new(RwLock::new(LogStore::new()));
+        let mut config = create_test_config();
+        config.data_dir = dir.path().to_str().unwrap().to_string();
+        let storage = Arc::new(PersistentStorage::new(&config.data_dir, 1));
+
+        let election = Election::new(state.clone(), log, &config, storage);
+
+        // 发送 TimeoutNow
+        let request = TimeoutNowRequest { term: 0 };
+        let _response = election.handle_timeout_now(request).await;
+
+        // 验证节点成为 Candidate 或 Leader（取决于选举结果）
+        let state_guard = state.read().await;
+        assert!(state_guard.role == NodeRole::Candidate || state_guard.role == NodeRole::Leader);
     }
 }

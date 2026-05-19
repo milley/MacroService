@@ -15,6 +15,12 @@ service RaftService {
 
     // 快照安装
     rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+
+    // Leader 转移
+    rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
+
+    // 触发立即选举（Leader 转移用）
+    rpc TimeoutNow(TimeoutNowRequest) returns (TimeoutNowResponse);
 }
 
 // ============ 投票消息 ============
@@ -80,4 +86,27 @@ message InstallSnapshotRequest {
 
 message InstallSnapshotResponse {
     uint64 term = 1;
+}
+
+// ============ Leader 转移消息 ============
+
+message TransferLeaderRequest {
+    uint64 term = 1;              // Leader 的当前任期
+    uint32 leader_id = 2;         // 当前 Leader ID
+    uint32 target_id = 3;         // 目标节点 ID
+}
+
+message TransferLeaderResponse {
+    uint64 term = 1;              // 响应者的当前任期
+    bool success = 2;             // 是否接受转移请求
+}
+
+// ============ TimeoutNow 消息（Leader 转移用） ============
+
+message TimeoutNowRequest {
+    uint64 term = 1;              // Leader 的当前任期
+}
+
+message TimeoutNowResponse {
+    uint64 term = 1;              // 响应者的当前任期
 }
