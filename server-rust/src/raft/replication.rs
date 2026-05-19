@@ -21,6 +21,8 @@ pub struct Replication {
     snapshot_threshold: u64,
     /// KV 存储（用于获取快照数据）
     kv_store: Option<Arc<KVStore>>,
+    /// 每次 AppendEntries 发送的最大日志条数
+    max_entries_per_append: usize,
 }
 
 impl Replication {
@@ -44,6 +46,7 @@ impl Replication {
             storage: None,
             snapshot_threshold: config.snapshot_threshold,
             kv_store: None,
+            max_entries_per_append: config.max_entries_per_append,
         }
     }
 
@@ -204,10 +207,12 @@ impl Replication {
             }
 
             // 正常日志复制：获取需要发送的日志条目
+            let max_entries = self.max_entries_per_append;
             let log = self.log.read().await;
             let entries: Vec<crate::proto::raft::LogEntry> = log
                 .entries_from(next_index)
                 .into_iter()
+                .take(max_entries)
                 .map(|e| crate::proto::raft::LogEntry {
                     term: e.term,
                     index: e.index,
@@ -215,6 +220,7 @@ impl Replication {
                 })
                 .collect();
 
+            let entries_count = entries.len();
             let prev_log_index = if next_index > 1 { next_index - 1 } else { 0 };
             let prev_log_term = if prev_log_index > 0 {
                 log.get(prev_log_index).map(|e| e.term).unwrap_or(0)
@@ -238,6 +244,14 @@ impl Replication {
             let state_clone = self.state.clone();
             let success_count_clone = self.heartbeat_success_count.clone();
             let majority = (self.peers.len() + 1) / 2 + 1;
+            let node_id_for_log = node_id;
+
+            if entries_count > 0 {
+                tracing::debug!(
+                    "Leader {} sending {} entries to peer {} (next_index={})",
+                    node_id_for_log, entries_count, peer_id, next_index
+                );
+            }
 
             tokio::spawn(async move {
                 match RaftServiceClient::connect(format!("http://{}", peer_addr)).await {
@@ -522,6 +536,7 @@ mod tests {
             ],
             data_dir: "./data".to_string(),
             snapshot_threshold: 10,
+            max_entries_per_append: 5,
         }
     }
 

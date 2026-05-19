@@ -29,6 +29,10 @@ pub struct CliConfig {
     /// 快照触发阈值（日志条目数超过此值时触发快照）
     #[arg(long, default_value = "1000")]
     pub snapshot_threshold: u64,
+
+    /// 每次 AppendEntries 发送的最大日志条数
+    #[arg(long, default_value = "100")]
+    pub max_entries_per_append: usize,
 }
 
 /// 集群节点信息
@@ -47,6 +51,7 @@ pub struct NodeConfig {
     pub peers: Vec<Peer>,
     pub data_dir: String,
     pub snapshot_threshold: u64,
+    pub max_entries_per_append: usize,
 }
 
 impl From<CliConfig> for NodeConfig {
@@ -81,6 +86,7 @@ impl From<CliConfig> for NodeConfig {
             peers,
             data_dir: cli.data_dir,
             snapshot_threshold: cli.snapshot_threshold,
+            max_entries_per_append: cli.max_entries_per_append,
         }
     }
 }
@@ -103,6 +109,7 @@ mod tests {
         assert_eq!(config.peers, "");
         assert_eq!(config.data_dir, "./data");
         assert_eq!(config.snapshot_threshold, 1000);
+        assert_eq!(config.max_entries_per_append, 100);
     }
 
     #[test]
@@ -128,6 +135,17 @@ mod tests {
         ]);
 
         assert_eq!(config.snapshot_threshold, 500);
+    }
+
+    #[test]
+    fn test_cli_config_max_entries() {
+        let config = parse_cli(&[
+            "test",
+            "--node-id", "1",
+            "--max-entries-per-append", "50",
+        ]);
+
+        assert_eq!(config.max_entries_per_append, 50);
     }
 
     #[test]
@@ -161,6 +179,7 @@ mod tests {
         assert_eq!(config.peers[0].raft_addr, "127.0.0.1:60052");
         assert_eq!(config.peers[1].id, 3);
         assert_eq!(config.snapshot_threshold, 1000);
+        assert_eq!(config.max_entries_per_append, 100);
     }
 
     #[test]
