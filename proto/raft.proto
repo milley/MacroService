@@ -21,6 +21,10 @@ service RaftService {
 
     // 触发立即选举（Leader 转移用）
     rpc TimeoutNow(TimeoutNowRequest) returns (TimeoutNowResponse);
+
+    // 成员变更
+    rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
+    rpc RemoveNode(RemoveNodeRequest) returns (RemoveNodeResponse);
 }
 
 // ============ 投票消息 ============
@@ -109,4 +113,41 @@ message TimeoutNowRequest {
 
 message TimeoutNowResponse {
     uint64 term = 1;              // 响应者的当前任期
+}
+
+// ============ 成员变更消息 ============
+
+message AddNodeRequest {
+    uint64 term = 1;              // Leader 的当前任期
+    uint32 leader_id = 2;         // Leader ID
+    uint32 node_id = 3;           // 新节点 ID
+    string node_addr = 4;         // 新节点的 Raft 地址
+}
+
+message AddNodeResponse {
+    uint64 term = 1;              // 响应者的当前任期
+    bool success = 2;             // 是否成功
+}
+
+message RemoveNodeRequest {
+    uint64 term = 1;              // Leader 的当前任期
+    uint32 leader_id = 2;         // Leader ID
+    uint32 node_id = 3;           // 要移除的节点 ID
+}
+
+message RemoveNodeResponse {
+    uint64 term = 1;              // 响应者的当前任期
+    bool success = 2;             // 是否成功
+}
+
+// ============ 配置变更日志条目 ============
+
+message ConfigChange {
+    enum ChangeType {
+        ADD_NODE = 0;
+        REMOVE_NODE = 1;
+    }
+    ChangeType change_type = 1;
+    uint32 node_id = 2;
+    string node_addr = 3;         // 仅 ADD_NODE 时有效
 }

@@ -4,12 +4,14 @@ use tokio::sync::RwLock;
 
 use crate::kv::KVStore;
 use crate::proto::raft::{
-    raft_service_server::RaftService, AppendEntriesRequest, AppendEntriesResponse,
-    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse,
-    TimeoutNowRequest, TimeoutNowResponse, TransferLeaderRequest, TransferLeaderResponse,
-    VoteRequest, VoteResponse,
+    raft_service_server::RaftService, AddNodeRequest, AddNodeResponse, AppendEntriesRequest,
+    AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest,
+    PreVoteResponse, RemoveNodeRequest, RemoveNodeResponse, TimeoutNowRequest,
+    TimeoutNowResponse, TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
 };
-use crate::raft::{Election, ElectionTimer, LogStore, PersistentData, PersistentStorage, RaftState};
+use crate::raft::{
+    Election, ElectionTimer, LogStore, Membership, PersistentData, PersistentStorage, RaftState,
+};
 
 /// Raft gRPC 服务实现
 pub struct RaftServiceImpl {
@@ -19,6 +21,7 @@ pub struct RaftServiceImpl {
     election_timer: Arc<RwLock<ElectionTimer>>,
     storage: Arc<PersistentStorage>,
     kv_store: Arc<KVStore>,
+    membership: Arc<Membership>,
 }
 
 impl RaftServiceImpl {
@@ -29,6 +32,7 @@ impl RaftServiceImpl {
         election_timer: Arc<RwLock<ElectionTimer>>,
         storage: Arc<PersistentStorage>,
         kv_store: Arc<KVStore>,
+        membership: Arc<Membership>,
     ) -> Self {
         Self {
             state,
@@ -37,6 +41,7 @@ impl RaftServiceImpl {
             election_timer,
             storage,
             kv_store,
+            membership,
         }
     }
 }
@@ -291,6 +296,34 @@ impl RaftService for RaftServiceImpl {
         drop(timer);
 
         let response = self.election.handle_timeout_now(req).await;
+        Ok(Response::new(response))
+    }
+
+    async fn add_node(
+        &self,
+        request: Request<AddNodeRequest>,
+    ) -> Result<Response<AddNodeResponse>, Status> {
+        let req = request.into_inner();
+
+        tracing::info!(
+            "Received AddNode request: node_id={}, addr={}",
+            req.node_id,
+            req.node_addr
+        );
+
+        let response = self.membership.handle_add_node(req).await;
+        Ok(Response::new(response))
+    }
+
+    async fn remove_node(
+        &self,
+        request: Request<RemoveNodeRequest>,
+    ) -> Result<Response<RemoveNodeResponse>, Status> {
+        let req = request.into_inner();
+
+        tracing::info!("Received RemoveNode request: node_id={}", req.node_id);
+
+        let response = self.membership.handle_remove_node(req).await;
         Ok(Response::new(response))
     }
 }

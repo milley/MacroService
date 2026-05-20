@@ -13,7 +13,7 @@ use kv::{KVServiceImpl, KVStore};
 use proto::calculator::calculator_server::CalculatorServer;
 use proto::kv::kv_service_server::KvServiceServer;
 use proto::raft::raft_service_server::RaftServiceServer;
-use raft::{Election, ElectionTimer, HeartbeatTimer, LogStore, PendingRequests, PersistentStorage, RaftState, Replication};
+use raft::{Election, ElectionTimer, HeartbeatTimer, LogStore, Membership, PendingRequests, PersistentStorage, RaftState, Replication};
 
 /// Calculator 服务实现（保留原有 demo）
 mod calculator_service {
@@ -232,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 创建 Raft gRPC 服务
+    let membership = Arc::new(Membership::new(raft_state.clone(), log_store.clone()));
     let raft_service = RaftServiceImpl::new(
         raft_state.clone(),
         log_store.clone(),
@@ -239,6 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         election_timer.clone(),
         storage.clone(),
         kv_store.clone(),
+        membership,
     );
 
     // 创建 KV gRPC 服务

@@ -1,5 +1,6 @@
 pub mod election;
 pub mod log;
+pub mod membership;
 pub mod pending;
 pub mod replication;
 pub mod rpc;
@@ -9,6 +10,7 @@ pub mod timer;
 
 pub use election::Election;
 pub use log::{LogEntry, LogStore};
+pub use membership::Membership;
 pub use pending::PendingRequests;
 pub use replication::Replication;
 pub use rpc::RaftServiceImpl;
