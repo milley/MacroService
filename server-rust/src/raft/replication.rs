@@ -537,6 +537,7 @@ mod tests {
             data_dir: "./data".to_string(),
             snapshot_threshold: 10,
             max_entries_per_append: 5,
+            metrics_addr: "127.0.0.1:9091".parse().unwrap(),
         }
     }
 

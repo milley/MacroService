@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 
 mod config;
 mod kv;
+mod metrics;
 mod proto;
 mod raft;
 
@@ -255,10 +256,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nServers starting...");
     println!("  Client API: {}", config.client_addr);
     println!("  Raft RPC:   {}", config.raft_addr);
+    println!("  Metrics:    http://{}", config.metrics_addr);
 
     // 同时启动两个 gRPC 服务器
     let client_addr = config.client_addr;
     let raft_addr = config.raft_addr;
+    let metrics_addr = config.metrics_addr;
 
     let client_server = tokio::spawn(async move {
         Server::builder()
@@ -275,6 +278,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
     });
 
+    // 启动 Metrics 服务器
+    let metrics_state = raft_state.clone();
+    let metrics_server = tokio::spawn(async move {
+        metrics::start_metrics_server(metrics_addr, metrics_state).await
+    });
+
     // 等待任一服务器完成
     tokio::select! {
         result = client_server => {
@@ -283,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result = raft_server => {
             result??;
         }
+        _ = metrics_server => {}
     }
 
     Ok(())

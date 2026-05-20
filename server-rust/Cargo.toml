@@ -28,6 +28,12 @@ rand = "0.9"
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 
+# Metrics
+prometheus = "0.13"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
 [build-dependencies]
 tonic-build = "0.12"
 

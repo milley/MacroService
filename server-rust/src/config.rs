@@ -33,6 +33,10 @@ pub struct CliConfig {
     /// 每次 AppendEntries 发送的最大日志条数
     #[arg(long, default_value = "100")]
     pub max_entries_per_append: usize,
+
+    /// Metrics HTTP 服务端口
+    #[arg(long)]
+    pub metrics_port: Option<u16>,
 }
 
 /// 集群节点信息
@@ -52,6 +56,7 @@ pub struct NodeConfig {
     pub data_dir: String,
     pub snapshot_threshold: u64,
     pub max_entries_per_append: usize,
+    pub metrics_addr: SocketAddr,
 }
 
 impl From<CliConfig> for NodeConfig {
@@ -87,6 +92,12 @@ impl From<CliConfig> for NodeConfig {
             data_dir: cli.data_dir,
             snapshot_threshold: cli.snapshot_threshold,
             max_entries_per_append: cli.max_entries_per_append,
+            metrics_addr: format!(
+                "127.0.0.1:{}",
+                cli.metrics_port.unwrap_or(9090 + cli.node_id as u16)
+            )
+            .parse()
+            .expect("Invalid metrics address"),
         }
     }
 }
@@ -110,6 +121,7 @@ mod tests {
         assert_eq!(config.data_dir, "./data");
         assert_eq!(config.snapshot_threshold, 1000);
         assert_eq!(config.max_entries_per_append, 100);
+        assert!(config.metrics_port.is_none());
     }
 
     #[test]
@@ -180,6 +192,8 @@ mod tests {
         assert_eq!(config.peers[1].id, 3);
         assert_eq!(config.snapshot_threshold, 1000);
         assert_eq!(config.max_entries_per_append, 100);
+        // node_id=1 -> metrics_port=9091
+        assert_eq!(config.metrics_addr.to_string(), "127.0.0.1:9091");
     }
 
     #[test]
