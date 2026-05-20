@@ -266,13 +266,85 @@ pub async fn start_metrics_server(addr: std::net::SocketAddr, state: Arc<RwLock<
                                 .body(Full::new(Bytes::from(output)))
                                 .unwrap())
                         }
+                        "/health" | "/healthz" => {
+                            // 存活检查：服务能响应即健康
+                            let state_guard = state.read().await;
+                            let role = match state_guard.role {
+                                crate::raft::NodeRole::Follower => "follower",
+                                crate::raft::NodeRole::Candidate => "candidate",
+                                crate::raft::NodeRole::Leader => "leader",
+                            };
+                            let term = state_guard.persistent.read().await.current_term;
+                            let node_id = state_guard.node_id;
+                            drop(state_guard);
+
+                            let health_json = serde_json::json!({
+                                "status": "healthy",
+                                "node_id": node_id,
+                                "role": role,
+                                "term": term
+                            });
+
+                            Ok(Response::builder()
+                                .header("Content-Type", "application/json")
+                                .body(Full::new(Bytes::from(
+                                    serde_json::to_string(&health_json).unwrap()
+                                )))
+                                .unwrap())
+                        }
+                        "/ready" | "/readyz" => {
+                            // 就绪检查：节点已加入集群
+                            let state_guard = state.read().await;
+                            let is_ready = state_guard.peers.len() > 0 || state_guard.role == crate::raft::NodeRole::Leader;
+                            let role = match state_guard.role {
+                                crate::raft::NodeRole::Follower => "follower",
+                                crate::raft::NodeRole::Candidate => "candidate",
+                                crate::raft::NodeRole::Leader => "leader",
+                            };
+                            let leader_id = *state_guard.leader_id.read().await;
+                            let node_id = state_guard.node_id;
+                            drop(state_guard);
+
+                            if is_ready {
+                                let ready_json = serde_json::json!({
+                                    "status": "ready",
+                                    "node_id": node_id,
+                                    "role": role,
+                                    "leader_id": leader_id
+                                });
+                                Ok(Response::builder()
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from(
+                                        serde_json::to_string(&ready_json).unwrap()
+                                    )))
+                                    .unwrap())
+                            } else {
+                                let not_ready_json = serde_json::json!({
+                                    "status": "not_ready",
+                                    "node_id": node_id,
+                                    "reason": "no peers configured"
+                                });
+                                Ok(Response::builder()
+                                    .status(503)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from(
+                                        serde_json::to_string(&not_ready_json).unwrap()
+                                    )))
+                                    .unwrap())
+                            }
+                        }
                         "/" => {
                             Ok(Response::builder()
                                 .header("Content-Type", "text/html")
                                 .body(Full::new(Bytes::from(
                                     "<html><body>\
-                                    <h1>Raft KV Store Metrics</h1>\
-                                    <p><a href=\"/metrics\">/metrics</a> - Prometheus metrics</p>\
+                                    <h1>Raft KV Store</h1>\
+                                    <h2>Endpoints</h2>\
+                                    <ul>\
+                                    <li><a href=\"/metrics\">/metrics</a> - Prometheus metrics</li>\
+                                    <li><a href=\"/health\">/health</a> - Health check (liveness)</li>\
+                                    <li><a href=\"/ready\">/ready</a> - Readiness check</li>\
+                                    </ul>\
                                     </body></html>"
                                 )))
                                 .unwrap())
